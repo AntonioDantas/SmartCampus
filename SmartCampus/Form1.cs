@@ -1,9 +1,16 @@
-﻿using Accord.Neuro;
+﻿//using Accord.Neuro;
+//using Accord.Neuro.Learning;
+//using Accord.Statistics;
+//using ArtificialNeuralNetwork;
+//using ArtificialNeuralNetwork.Factories;
+using Accord.Neuro;
 using Accord.Neuro.Learning;
 using GMap.NET;
 using GMap.NET.MapProviders;
 using GMap.NET.WindowsForms;
 using GMap.NET.WindowsForms.Markers;
+using SharpLearning.AdaBoost.Learners;
+using SharpLearning.AdaBoost.Models;
 using SharpLearning.InputOutput.Csv;
 using SharpLearning.Metrics.Regression;
 using SharpLearning.Neural;
@@ -36,20 +43,19 @@ namespace SmartCampus
         public List<Dado> dados = new List<Dado>(); //Lista de Informações
         public string[] predios = { "IEST", "IMC", "IEPG", "ADM", "BIM" };
         public int[] quantidades = { 0, 0, 0, 0, 0 }; //Quantidade a ser previsata
-        List<List<PointLatLng>> points = new List<List<PointLatLng>>(); //Lista dos pontos para gerar o poligono
-        List<PointLatLng> centros = new List<PointLatLng>(); //Lista dos pontos centrais do poligono
         public string treinamento = "D;A0;A1;A2;A3;A4;T\r\n"; //Cabeçalho
         public string teste = "D;A0;A1;A2;A3;A4;T\r\n"; //Cabeçalho
         double[] UltimaObservacao = null; //Auxiliar para previsão até data corrente
         DateTime UltimaHora = DateTime.Now; //Auxiliar para previsão até data corrente
+        RegressionAdaBoostModel modelada; //modelo para treinamento Ada 
         RegressionNeuralNetModel modelnet; //modelo para treinamento da Rede Neural
         RegressionForestModel model; //modelo para treinamento da Floresta Aleatória
-        double trainErrorNet, testErrorNet, trainError, testError = 0; //Variáveis para teste dos modelos
+        double trainErrorAda, testErrorAda, trainErrorNet, testErrorNet, trainError, testError = 0; //Variáveis para teste dos modelos
 
         public Form1()
         {
             InitializeComponent();
-            StreamReader rd = new StreamReader(@"..\..\..\example.csv");
+            StreamReader rd = new StreamReader(@"..\..\client ap_allData_20190610_121622_427.csv");
 
             string linha = null;
             string[] linhaseparada = null;
@@ -85,51 +91,47 @@ namespace SmartCampus
             map.MinZoom = 5;
             map.Zoom = 17;
 
-
-            initColorsBlocks();
-            Visualizacoes();
-
             //Todos Prédios
             for (var p = 0; p < predios.Count(); p++)
             {
-                try
+                ObterDados(predios[p]);
+                RegressionLearner_Learn_And_Predict();
+
+                double predicaoAnt = UltimaObservacao[5];
+                double predicao = UltimaObservacao[5];
+
+                //DateTime objetivo = DateTime.Now.AddHours(1);
+                DateTime objetivo = UltimaHora.AddHours(1);
+
+                while (UltimaHora < objetivo) //Enquanto não chegar a data atual + 1 hora permanece prevendo
                 {
-                    ObterDados(predios[p]);
-                    RegressionLearner_Learn_And_Predict();
-
-                    double predicaoAnt = UltimaObservacao[5];
-                    double predicao = UltimaObservacao[5];
-
-                    //DateTime objetivo = DateTime.Now.AddHours(1);
-                    DateTime objetivo = UltimaHora.AddHours(1);
-
-                    while (UltimaHora < objetivo) //Enquanto não chegar a data atual + 1 hora permanece prevendo
+                    //Estrutura para predição
+                    double[] pre = new double[] { UltimaHora.DayOfWeek.GetHashCode(), UltimaObservacao[2], UltimaObservacao[3], UltimaObservacao[4], UltimaObservacao[5], predicaoAnt };
+                    
+                    if(testErrorNet < testError && testErrorNet < testErrorAda) //Qual melhor técnica
+                        predicao = modelnet.Predict(pre);
+                    else
                     {
-                        //Estrutura para predição
-                        double[] pre = new double[] { UltimaHora.DayOfWeek.GetHashCode(), UltimaObservacao[2], UltimaObservacao[3], UltimaObservacao[4], UltimaObservacao[5], predicaoAnt };
-
-                        if (testErrorNet < testError) //Qual melhor técnica
-                            predicao = modelnet.Predict(pre);
-                        else
+                        if(testError < testErrorNet && testError < testErrorAda)
                             predicao = model.Predict(pre);
+                        else
+                            predicao = modelada.Predict(pre);
 
-                        UltimaObservacao = new double[] { UltimaHora.DayOfWeek.GetHashCode(), UltimaObservacao[2], UltimaObservacao[3], UltimaObservacao[4], UltimaObservacao[5], predicaoAnt, predicao };
-
-                        predicaoAnt = predicao;
-                        UltimaHora = UltimaHora.AddHours(1);
                     }
+                    UltimaObservacao = new double[] { UltimaHora.DayOfWeek.GetHashCode(), UltimaObservacao[2], UltimaObservacao[3], UltimaObservacao[4], UltimaObservacao[5], predicaoAnt, predicao };
 
-                    //Resultado da predição
-                    quantidades[p] = (int)predicao;
+                    predicaoAnt = predicao;
+                    UltimaHora = UltimaHora.AddHours(1);
                 }
-                catch
-                {
 
-                }
+                //Resultado da predição
+                quantidades[p] = (int)predicao;
             }
 
-            for (int i = 0; i < predios.Count(); i++)
-                CriaRetangulo(points[i], predios[i], centros[i], quantidades[i], quantidades.Max());
+            initColorsBlocks();
+            Ver();
+
+
         }
 
         public byte Alpha = 0x7d;
@@ -159,9 +161,9 @@ namespace SmartCampus
                 .ToF64Matrix();
             var targets = parser.EnumerateRows(targetName)
                 .ToF64Vector();
-            UltimaObservacao = new double[] { observations[observations.RowCount - 1, 0], observations[observations.RowCount - 1, 2], observations[observations.RowCount - 1, 3], observations[observations.RowCount - 1, 4], observations[observations.RowCount - 1, 5], targets[targets.Count() - 1] };
+            UltimaObservacao = new double[] { observations[observations.RowCount-1, 0], observations[observations.RowCount-1, 2], observations[observations.RowCount-1, 3], observations[observations.RowCount-1, 4], observations[observations.RowCount-1, 5], targets[targets.Count() - 1] };
 
-            var learner = new RegressionRandomForestLearner(trees: 5000);
+            var learner = new RegressionRandomForestLearner(trees: 500);
             model = learner.Learn(observations, targets);
             #endregion 
 
@@ -171,13 +173,14 @@ namespace SmartCampus
                 .ToF64Matrix();
             var targetsTeste = parser.EnumerateRows(targetName)
                            .ToF64Vector();
-
+                       
             // predict the training and test set.
             var trainPredictions = model.Predict(observations);
             var testPredictions = model.Predict(observationsTeste);
-
+            
             // create the metric
             var metric = new MeanSquaredErrorRegressionMetric();
+
 
             // measure the error on training and test set.
             trainError = metric.Error(targets, trainPredictions);
@@ -193,17 +196,40 @@ namespace SmartCampus
             net.Add(new DenseLayer(800, Activation.Relu));
             net.Add(new DropoutLayer(0.5));
             net.Add(new SquaredErrorRegressionLayer());
-
-            var learnernet = new RegressionNeuralNetLearner(net, iterations: 2000, loss: new SquareLoss());
+            
+            var learnernet = new RegressionNeuralNetLearner(net, iterations: 500, loss: new SquareLoss());
             modelnet = learnernet.Learn(observations, targets);
             #endregion
 
             #region Teste da Rede Neural
             trainPredictions = modelnet.Predict(observations);
             testPredictions = modelnet.Predict(observationsTeste);
-
+            
             trainErrorNet = metric.Error(targets, trainPredictions);
             testErrorNet = metric.Error(targetsTeste, testPredictions);
+            #endregion
+                       
+            #region Treinamento Ada
+            var learnerada = new RegressionAdaBoostLearner(maximumTreeDepth: 35, iterations: 2000, learningRate: 0.1);
+            modelada = learnerada.Learn(observations, targets);
+            #endregion
+
+            #region Teste Ada
+            trainPredictions = modelada.Predict(observations);
+            testPredictions = modelada.Predict(observationsTeste);
+
+            trainErrorAda = metric.Error(targets, trainPredictions);
+            testErrorAda = metric.Error(targetsTeste, testPredictions);
+
+            string stargets = "";
+            string strainPredictions = "";
+            string stargetsTeste = "";
+            string stestPredictions = "";
+
+            foreach (var i in targets) stargets += i + ";";
+            foreach (var i in trainPredictions) strainPredictions += i + ";";
+            foreach (var i in targetsTeste) stargetsTeste += i + ";";
+            foreach (var i in testPredictions) stestPredictions += i + ";";
             #endregion
 
         }
@@ -271,49 +297,44 @@ namespace SmartCampus
         /// <summary>
         /// Visualização dos resultados no mapa
         /// </summary>
-        private void Visualizacoes()
+        private void Ver()
         {
             map.Overlays.Clear();
 
-            List<PointLatLng> lst = new List<PointLatLng>();
-            lst.Add(new PointLatLng(-22.412097, -45.450659));
-            lst.Add(new PointLatLng(-22.411383, -45.450104));
-            lst.Add(new PointLatLng(-22.411936, -45.449243));
-            lst.Add(new PointLatLng(-22.412667, -45.449836));
-            points.Add(lst);
-            centros.Add(new PointLatLng(-22.412081, -45.450002));
+            List<PointLatLng> points = new List<PointLatLng>();
+            points.Add(new PointLatLng(-22.412097, -45.450659));
+            points.Add(new PointLatLng(-22.411383, -45.450104));
+            points.Add(new PointLatLng(-22.411936, -45.449243));
+            points.Add(new PointLatLng(-22.412667, -45.449836));
+            CriaRetangulo(points, "IEST", new PointLatLng(-22.412081, -45.450002), quantidades[0], quantidades.Max());
 
-            List<PointLatLng> lst2 = new List<PointLatLng>();
-            lst2.Add(new PointLatLng(-22.414410, -45.449176));
-            lst2.Add(new PointLatLng(-22.413884, -45.448707));
-            lst2.Add(new PointLatLng(-22.414244, -45.448074));
-            lst2.Add(new PointLatLng(-22.414827, -45.448535));
-            points.Add(lst2);
-            centros.Add(new PointLatLng(-22.414358, -45.448651));
+            points = new List<PointLatLng>();
+            points.Add(new PointLatLng(-22.414410, -45.449176));
+            points.Add(new PointLatLng(-22.413884, -45.448707));
+            points.Add(new PointLatLng(-22.414244, -45.448074));
+            points.Add(new PointLatLng(-22.414827, -45.448535));
+            CriaRetangulo(points, "IMC", new PointLatLng(-22.414358, -45.448651), quantidades[1], quantidades.Max());
 
-            List<PointLatLng> lst3 = new List<PointLatLng>();
-            lst3.Add(new PointLatLng(-22.413944, -45.450194));
-            lst3.Add(new PointLatLng(-22.413203, -45.449615));
-            lst3.Add(new PointLatLng(-22.413587, -45.449051));
-            lst3.Add(new PointLatLng(-22.414291, -45.449641));
-            points.Add(lst3);
-            centros.Add(new PointLatLng(-22.413830, -45.449593));
+            points = new List<PointLatLng>();
+            points.Add(new PointLatLng(-22.413944, -45.450194));
+            points.Add(new PointLatLng(-22.413203, -45.449615));
+            points.Add(new PointLatLng(-22.413587, -45.449051));
+            points.Add(new PointLatLng(-22.414291, -45.449641));
+            CriaRetangulo(points, "IEPG", new PointLatLng(-22.413830, -45.449593), quantidades[2], quantidades.Max());
 
-            List<PointLatLng> lst4 = new List<PointLatLng>();
-            lst4.Add(new PointLatLng(-22.413215, -45.450666));
-            lst4.Add(new PointLatLng(-22.412920, -45.450427));
-            lst4.Add(new PointLatLng(-22.413173, -45.449968));
-            lst4.Add(new PointLatLng(-22.413438, -45.450186));
-            points.Add(lst4);
-            centros.Add(new PointLatLng(-22.413210, -45.450381));
+            points = new List<PointLatLng>();
+            points.Add(new PointLatLng(-22.413215, -45.450666));
+            points.Add(new PointLatLng(-22.412920, -45.450427));
+            points.Add(new PointLatLng(-22.413173, -45.449968));
+            points.Add(new PointLatLng(-22.413438, -45.450186));
+            CriaRetangulo(points, "ADM", new PointLatLng(-22.413210, -45.450381), quantidades[3], quantidades.Max());
 
-            List<PointLatLng> lst5 = new List<PointLatLng>();
-            lst5.Add(new PointLatLng(-22.412962, -45.449166));
-            lst5.Add(new PointLatLng(-22.412560, -45.448871));
-            lst5.Add(new PointLatLng(-22.412893, -45.448318));
-            lst5.Add(new PointLatLng(-22.413344, -45.448683));
-            points.Add(lst5);
-            centros.Add(new PointLatLng(-22.412982, -45.448726));
+            points = new List<PointLatLng>();
+            points.Add(new PointLatLng(-22.412962, -45.449166));
+            points.Add(new PointLatLng(-22.412560, -45.448871));
+            points.Add(new PointLatLng(-22.412893, -45.448318));
+            points.Add(new PointLatLng(-22.413344, -45.448683));
+            CriaRetangulo(points, "BIM", new PointLatLng(-22.412982, -45.448726), quantidades[4], quantidades.Max());
         }
 
         private void PictureBox1_Click(object sender, EventArgs e)
@@ -336,7 +357,7 @@ namespace SmartCampus
                 //Inicia no mês 5 até mês 6
                 for (var m = 5; m <= 6; m++)
                 {
-                    List<Dado> mes = (from d in l where d.DataHora.Month == m select d).OrderBy(x => x.DataHora).ToList();
+                    List < Dado > mes = (from d in l where d.DataHora.Month == m select d).OrderBy(x => x.DataHora).ToList();
                     //Inicia no dia 1 até o dia 31
                     for (var i = 1; i <= 31 && mes.Count > 0; i++)
                     {
@@ -353,12 +374,12 @@ namespace SmartCampus
                                     linha += $"{(from x in temp where x.DataHora.Hour >= k && k <= x.DataHora.Add(x.Duracao).Hour select x.MacUsuario).Distinct().Count()};";
                                 }
                                 linha = linha.Substring(0, linha.Length - 1) + "\r\n";
-
+                                
                                 //Se alguma previsão retornou 0
                                 if (!linha.Contains(";0"))
                                 {
                                     //Separa um range para Treinamento e outro para Teste
-                                    if (new DateTime(2019, m, i) < new DateTime(2019, 6, 20))
+                                    if (new DateTime(2019, m, i) < new DateTime(2019, 6, 10))
                                     {
                                         treinamento += linha;
                                         //Atualiza última hora com dados reais
@@ -388,5 +409,5 @@ namespace SmartCampus
             teste = teste.Substring(0, teste.Length - 2);
 
         }
-    }
+}
 }
